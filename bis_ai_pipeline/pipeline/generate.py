@@ -11,8 +11,22 @@ Response generation, dynamic field translation, and citation-forcing synthesis f
 
 import json
 from typing import Dict, Any, List, Optional
-from pipeline.prompts import build_citation_prompt
-from pipeline.translate import translate_to_hindi
+from .prompts import build_citation_prompt
+from .translate import translate_to_hindi
+
+
+def format_val(val: Any, indent: int = 0) -> str:
+    """Render a nested value (list/dict/primitive) as human-readable markdown text."""
+    prefix = "  " * indent
+    if isinstance(val, list):
+        items = "\n".join(f"{prefix}  - {format_val(item, indent + 1)}" for item in val)
+        return f"\n{items}" if items else ""
+    if isinstance(val, dict):
+        parts = []
+        for k, v in val.items():
+            parts.append(f"{prefix}  - **{k}**:{format_val(v, indent + 1)}")
+        return "\n" + "\n".join(parts) if parts else ""
+    return str(val)
 
 
 def sanitize_url(raw_url: Optional[str], default_fallback: str = "https://www.services.bis.gov.in") -> str:
@@ -168,104 +182,113 @@ class AnswerGenerator:
         # 3. STRUCTURED PRODUCT / STANDARDS / CROSSWALK MATCHES
         # =====================================================================
         if structured:
-            # Case A: Single standard match from standards table
-            if len(structured) == 1 and ("title" in structured[0] or "standard_title" in structured[0]) and "product" not in structured[0]:
-                s = structured[0]
-                is_num = s.get("is_number", "IS Standard")
-                title = s.get("title") or s.get("is_title") or s.get("standard_title") or "Indian Standard Specification"
-                category = s.get("technical_committee") or s.get("product_category") or "General Engineering"
-                year = s.get("edition_year") or s.get("publication_year") or "Active"
-                status = s.get("status") or "ACTIVE"
-                src_url = sanitize_url(s.get("source_url") or s.get("bis_page_url") or s.get("pdf_url"))
-
-                citations = [{
-                    "is_number": is_num,
-                    "product": title,
-                    "title": title,
-                    "product_hi": translate_to_hindi(title),
-                    "title_hi": translate_to_hindi(title),
-                    "scheme": "Indian Standard Specification",
-                    "scheme_hi": "भारतीय मानक विनिर्देश",
-                    "source_url": src_url,
-                    "score": s.get("similarity_score", 1.0)
-                }]
-
-                bullet_list = format_citations_as_markdown(citations, is_hindi=target_lang_hindi)
-
-                if target_lang_hindi:
-                    text = (
-                        f"### भारतीय मानक ब्यूरो (BIS) - मानक विनिर्देश\n\n"
-                        f"{bullet_list}\n"
-                        f"- **तकनीकी समिति / श्रेणी**: {translate_to_hindi(category)}\n"
-                        f"- **स्थिति / वर्ष**: {translate_to_hindi(status)} ({year})"
-                    )
-                else:
-                    text = (
-                        f"### Indian Standard Specification Details\n\n"
-                        f"{bullet_list}\n"
-                        f"- **Category / Technical Committee**: {category}\n"
-                        f"- **Status / Year**: {status} ({year})"
-                    )
-                return {"answer": text, "citations": citations, "source": "SQLITE_STANDARDS_TABLE", "verified": True, "is_refusal": False}
-
-            # Case B: Multi-row or crosswalk matches
+            # Skip structured crosswalk results for generic CERTIFICATION_SCHEME process queries
+            # (e.g. "certification process for steel manufacturer") — let the template fallback
+            # handle those instead of returning product-standard lists.
+            _scheme_names = ("fmcs", "crs", "cbtf", "eco mark", "eco-mark", "isi scheme", "scheme i")
+            _is_scheme_specific = any(sn in query.lower() for sn in _scheme_names)
+            _is_process_query = any(kw in query.lower() for kw in ("certification process", "certification procedure", "certification of", "how to get", "how to obtain", "process of certification", "process to get", "apply for"))
+            if (intent == "CERTIFICATION_SCHEME" and not _is_scheme_specific) or (intent == "GENERAL_KNOWLEDGE" and _is_process_query):
+                pass  # skip structured results, fall through to template below
             else:
-                citations = []
-                for item in structured:
-                    is_n = item.get("is_number") or item.get("applicable_is_number") or "IS Standard"
-                    p_name = item.get("product") or item.get("title") or item.get("is_title") or ""
-                    scheme_val = item.get("scheme") or item.get("scheme_type") or "Scheme I (ISI Mark)"
-                    src_url = sanitize_url(item.get("source_url") or item.get("bis_page_url"))
-                    score = item.get("similarity_score", 0.9)
-
-                    citations.append({
-                        "is_number": is_n,
-                        "product": p_name,
-                        "title": p_name,
-                        "product_hi": translate_to_hindi(p_name),
-                        "title_hi": translate_to_hindi(p_name),
-                        "scheme": scheme_val,
-                        "scheme_hi": translate_to_hindi(scheme_val),
+                # Case A: Single standard match from standards table
+                if len(structured) == 1 and ("title" in structured[0] or "standard_title" in structured[0]) and "product" not in structured[0]:
+                    s = structured[0]
+                    is_num = s.get("is_number", "IS Standard")
+                    title = s.get("title") or s.get("is_title") or s.get("standard_title") or "Indian Standard Specification"
+                    category = s.get("technical_committee") or s.get("product_category") or "General Engineering"
+                    year = s.get("edition_year") or s.get("publication_year") or "Active"
+                    status = s.get("status") or "ACTIVE"
+                    src_url = sanitize_url(s.get("source_url") or s.get("bis_page_url") or s.get("pdf_url"))
+    
+                    citations = [{
+                        "is_number": is_num,
+                        "product": title,
+                        "title": title,
+                        "product_hi": translate_to_hindi(title),
+                        "title_hi": translate_to_hindi(title),
+                        "scheme": "Indian Standard Specification",
+                        "scheme_hi": "भारतीय मानक विनिर्देश",
                         "source_url": src_url,
-                        "score": score
-                    })
-
-                first_cat = structured[0].get("product_category") or "Mandatory Conformity Assessment"
-                first_scheme = structured[0].get("scheme") or structured[0].get("scheme_type") or "Scheme I (ISI Mark)"
-                bullet_list = format_citations_as_markdown(citations, is_hindi=target_lang_hindi)
-
-                if target_lang_hindi:
-                    cat_hi = translate_to_hindi(first_cat)
-                    scheme_hi = translate_to_hindi(first_scheme)
-                    lines = [
-                        f"### भारतीय मानक ब्यूरो (BIS) - अधिकृत विनिर्देश ({len(structured)} संबंधित रिकॉर्ड्स)\n",
-                        f"- **उत्पाद श्रेणी (Category)**: {cat_hi}",
-                        f"- **प्रमाणन योजना (Scheme)**: {scheme_hi} (अनिवार्य गुणवत्ता नियंत्रण आदेश - QCO)\n",
-                        "**सत्यापित मानक एवं विनिर्देश:**\n",
-                        bullet_list
-                    ]
-                    if additional_count > 0:
-                        lines.append(f"\n*(नोट: इस विनियामक आदेश के तहत {additional_count} अतिरिक्त मानक भी लागू होते हैं)*")
-                    lines.append("\n**अनुपालन नोट**: भारत में बिना वैध BIS मानक मार्क के इन उत्पादों का निर्माण, आयात, भंडारण अथवा बिक्री पूर्णतः प्रतिबंधित है।")
+                        "score": s.get("similarity_score", 1.0)
+                    }]
+    
+                    bullet_list = format_citations_as_markdown(citations, is_hindi=target_lang_hindi)
+    
+                    if target_lang_hindi:
+                        text = (
+                            f"### भारतीय मानक ब्यूरो (BIS) - मानक विनिर्देश\n\n"
+                            f"{bullet_list}\n"
+                            f"- **तकनीकी समिति / श्रेणी**: {translate_to_hindi(category)}\n"
+                            f"- **स्थिति / वर्ष**: {translate_to_hindi(status)} ({year})"
+                        )
+                    else:
+                        text = (
+                            f"### Indian Standard Specification Details\n\n"
+                            f"{bullet_list}\n"
+                            f"- **Category / Technical Committee**: {category}\n"
+                            f"- **Status / Year**: {status} ({year})"
+                        )
+                    return {"answer": text, "citations": citations, "source": "SQLITE_STANDARDS_TABLE", "verified": True, "is_refusal": False}
+    
+                # Case B: Multi-row or crosswalk matches
                 else:
-                    lines = [
-                        f"### Applicable BIS Indian Standards ({len(structured)} Relevant Records)\n",
-                        f"- **Product Category**: {first_cat}",
-                        f"- **Certification Scheme**: {first_scheme} (Mandatory Quality Control Order)\n",
-                        "**Verified Standards & Covered Specifications:**\n",
-                        bullet_list
-                    ]
-                    if additional_count > 0:
-                        lines.append(f"\n*(Note: {additional_count} additional standards also apply under this regulatory order)*")
-                    lines.append("\n**Compliance Note**: Manufacture, sale, or distribution without a valid BIS standard mark is strictly prohibited.")
-
-                return {
-                    "answer": "\n".join(lines),
-                    "citations": citations,
-                    "source": "SQLITE_CROSSWALK_TABLE",
-                    "verified": True,
-                    "is_refusal": False
-                }
+                    citations = []
+                    for item in structured:
+                        is_n = item.get("is_number") or item.get("applicable_is_number") or "IS Standard"
+                        p_name = item.get("product") or item.get("title") or item.get("is_title") or ""
+                        scheme_val = item.get("scheme") or item.get("scheme_type") or "Scheme I (ISI Mark)"
+                        src_url = sanitize_url(item.get("source_url") or item.get("bis_page_url"))
+                        score = item.get("similarity_score", 0.9)
+    
+                        citations.append({
+                            "is_number": is_n,
+                            "product": p_name,
+                            "title": p_name,
+                            "product_hi": translate_to_hindi(p_name),
+                            "title_hi": translate_to_hindi(p_name),
+                            "scheme": scheme_val,
+                            "scheme_hi": translate_to_hindi(scheme_val),
+                            "source_url": src_url,
+                            "score": score
+                        })
+    
+                    first_cat = structured[0].get("product_category") or "Mandatory Conformity Assessment"
+                    first_scheme = structured[0].get("scheme") or structured[0].get("scheme_type") or "Scheme I (ISI Mark)"
+                    bullet_list = format_citations_as_markdown(citations, is_hindi=target_lang_hindi)
+    
+                    if target_lang_hindi:
+                        cat_hi = translate_to_hindi(first_cat)
+                        scheme_hi = translate_to_hindi(first_scheme)
+                        lines = [
+                            f"### भारतीय मानक ब्यूरो (BIS) - अधिकृत विनिर्देश ({len(structured)} संबंधित रिकॉर्ड्स)\n",
+                            f"- **उत्पाद श्रेणी (Category)**: {cat_hi}",
+                            f"- **प्रमाणन योजना (Scheme)**: {scheme_hi} (अनिवार्य गुणवत्ता नियंत्रण आदेश - QCO)\n",
+                            "**सत्यापित मानक एवं विनिर्देश:**\n",
+                            bullet_list
+                        ]
+                        if additional_count > 0:
+                            lines.append(f"\n*(नोट: इस विनियामक आदेश के तहत {additional_count} अतिरिक्त मानक भी लागू होते हैं)*")
+                        lines.append("\n**अनुपालन नोट**: भारत में बिना वैध BIS मानक मार्क के इन उत्पादों का निर्माण, आयात, भंडारण अथवा बिक्री पूर्णतः प्रतिबंधित है।")
+                    else:
+                        lines = [
+                            f"### Applicable BIS Indian Standards ({len(structured)} Relevant Records)\n",
+                            f"- **Product Category**: {first_cat}",
+                            f"- **Certification Scheme**: {first_scheme} (Mandatory Quality Control Order)\n",
+                            "**Verified Standards & Covered Specifications:**\n",
+                            bullet_list
+                        ]
+                        if additional_count > 0:
+                            lines.append(f"\n*(Note: {additional_count} additional standards also apply under this regulatory order)*")
+                        lines.append("\n**Compliance Note**: Manufacture, sale, or distribution without a valid BIS standard mark is strictly prohibited.")
+    
+                    return {
+                        "answer": "\n".join(lines),
+                        "citations": citations,
+                        "source": "SQLITE_CROSSWALK_TABLE",
+                        "verified": True,
+                        "is_refusal": False
+                    }
 
         # =====================================================================
         # 4. CERTIFICATION SCHEMES & GENERAL KNOWLEDGE (CHROMA RAG)
@@ -305,45 +328,131 @@ class AnswerGenerator:
                 )
                 return {"answer": answer, "citations": citations, "source": "CHROMA_KNOWLEDGE_CORPUS", "verified": True, "is_refusal": False}
 
-            try:
-                chunk_obj = json.loads(best_chunk)
-                if isinstance(chunk_obj, dict):
-                    title = chunk_obj.get("title") or chunk_obj.get("name") or "BIS Knowledge Base"
-                    body_parts = [
-                        f"### {title}\n",
-                        bullet_list,
-                        ""
-                    ]
+            # Skip vector results for generic CERTIFICATION_SCHEME process queries
+            # (e.g. "certification process for steel manufacturer") — let the
+            # template fallback handle those instead of returning FMCS/CRS data.
+            _scheme_names = ("fmcs", "crs", "cbtf", "eco mark", "eco-mark", "isi scheme", "scheme i")
+            _is_scheme_specific = any(sn in query.lower() for sn in _scheme_names)
+            if intent == "CERTIFICATION_SCHEME" and not _is_scheme_specific:
+                pass  # skip vector processing, fall through to template below
+            else:
+                try:
+                    chunk_obj = json.loads(best_chunk)
+                    if isinstance(chunk_obj, dict):
+                        title = chunk_obj.get("title") or chunk_obj.get("name") or "BIS Knowledge Base"
+                        body_parts = [
+                            f"### {title}\n",
+                            bullet_list,
+                            ""
+                        ]
+    
+                        for key, val in chunk_obj.items():
+                            if key in ("title", "chunk_id") or not val:
+                                continue
+                            label = key.replace("_", " ").title()
+                            if isinstance(val, (dict, list)):
+                                rendered = format_val(val)
+                                body_parts.append(f"- **{label}**:{rendered}")
+                            else:
+                                body_parts.append(f"- **{label}**: {val}")
+    
+                        return {
+                            "answer": "\n".join(body_parts),
+                            "citations": citations,
+                            "source": "CHROMADB_VECTOR_STORE",
+                            "verified": True,
+                            "is_refusal": False
+                        }
+                except Exception:
+                        pass
 
-                    for key, val in chunk_obj.items():
-                        if key in ("title", "chunk_id") or not val:
-                            continue
-                        label = key.replace("_", " ").title()
-                        if isinstance(val, (dict, list)):
-                            val_str = json.dumps(val, indent=2, ensure_ascii=False)
-                            body_parts.append(f"- **{label}**:\n```json\n{val_str}\n```")
-                        else:
-                            body_parts.append(f"- **{label}**: {val}")
-
+                combined_context = "\n\n".join([v.get("text", "") for v in vectors[:2] if v.get("text")])
+                if combined_context.strip():
                     return {
-                        "answer": "\n".join(body_parts),
+                        "answer": f"### BIS Technical & Regulatory Knowledge\n\n{bullet_list}\n\n{combined_context}",
                         "citations": citations,
                         "source": "CHROMADB_VECTOR_STORE",
                         "verified": True,
                         "is_refusal": False
                     }
-            except Exception:
-                pass
 
-            combined_context = "\n\n".join([v.get("text", "") for v in vectors[:2] if v.get("text")])
-            if combined_context.strip():
-                return {
-                    "answer": f"### BIS Technical & Regulatory Knowledge\n\n{bullet_list}\n\n{combined_context}",
-                    "citations": citations,
-                    "source": "CHROMADB_VECTOR_STORE",
-                    "verified": True,
-                    "is_refusal": False
-                }
+        # =====================================================================
+        # CERTIFICATION SCHEME FALLBACK (generic process for non-scheme-specific queries)
+        # Runs when vectors are empty OR when query asks about process (not a named scheme)
+        # FMCS/CRS/CBTF/ECO queries with matching vectors skip this block
+        # =====================================================================
+        _scheme_names = ["fmcs", "crs", "cbtf", "eco mark", "eco-mark", "isi scheme", "scheme i"]
+        is_scheme_specific = any(sn in query.lower() for sn in _scheme_names)
+        _is_process_query = any(kw in query.lower() for kw in ("certification process", "certification procedure", "certification of", "how to get", "how to obtain", "process of certification", "process to get", "apply for"))
+        _is_cert_process_intent = intent == "CERTIFICATION_SCHEME" or (intent == "GENERAL_KNOWLEDGE" and _is_process_query)
+        _has_vectors = bool(vectors)
+        _use_template = not _has_vectors or not is_scheme_specific
+        if _is_cert_process_intent and _use_template:
+            # Extract product hint from query (keywords related to the product)
+            _product_keywords = ["steel", "cement", "battery", "cable", "pipe", "water", "toy",
+                                 "gas cylinder", "tyre", "food", "chemical", "electronic",
+                                 "solar", "wind", "petroleum", "natural gas", "electric",
+                                 "automotive", "machinery", "textile", "plastic", "rubber",
+                                 "glass", "ceramic", "paper", "printing", "packaging",
+                                 "mining", "construction", "agricultural", "pharmaceutical",
+                                 "medical", "cosmetic", "household", "stationery", "sport"]
+            _stop_words = {"what", "this", "that", "have", "with", "from", "which", "their",
+                           "there", "about", "other", "after", "before", "between", "through",
+                           "during", "above", "below", "scheme", "process", "processes",
+                           "certification", "certify", "applying", "apply", "application",
+                           "foreign", "manufacturer", "manufacturers", "how", "does", "does",
+                           "standards", "standard", "bureau", "indian", "mark", "quality",
+                           "regulation", "regulations", "legal", "like", "get", "obtain"}
+            product_hint = ""
+            for kw in _product_keywords:
+                if kw in query.lower():
+                    product_hint = kw.title()
+                    break
+            if not product_hint:
+                words = query.lower().split()
+                for w in reversed(words):
+                    clean = w.strip("?,.!;:")
+                    if len(clean) > 3 and clean not in _stop_words:
+                        product_hint = clean.capitalize()
+                        break
+            if target_lang_hindi:
+                product_display = translate_to_hindi(product_hint) if product_hint else "उत्पाद"
+                answer = (
+                    f"### {product_display} के लिये BIS प्रमाणन प्रक्रिया\n\n"
+                    f"**BIS प्रमानन प्राप्त करने की सामान्य प्रक्रिया (Scheme I — ISI मार्क):**\n\n"
+                    f"1. **पात्रता जाँच** — सुनिश्चित करें कि उत्पाद संबंधित QCO / IS मानक के तहत अनिवार्य है।\n"
+                    f"2. **आवेदन** — [MANAK Online](https://www.manakonline.in) पर ऑनलाइन आवेदन फॉर्म-5 के माध्यम से जमा करें।\n"
+                    f"3. **डॉक्यूमेंट्स** — कारखाना रजिस्ट्रेशन, IS मानक अनुरूपता प्रमाण पत्र, गुणवत्ता नियंत्रण प्रणाली दस्तावेज़, और परीक्षण रिपोर्ट जमा करें।\n"
+                    f"4. **कारखाना निरीक्षण** — BIS अधिकारी द्वारा निर्माण इकाई का भौतिक निरीक्षण और नमूना संकलन।\n"
+                    f"5. **परीक्षण** — नमूने BIS-मान्यता प्राप्त प्रयोगशाला में परीक्षण के लिये भेजे जाते हैं।\n"
+                    f"6. **लाइसेंस मान्यता** — सन्तोषजनक परीक्षण रिपोर्ट के बाद ISI मार्क लाइसेंस जारी किया जाता है।\n\n"
+                    f"**समय-सीमा**: आमतौर पर 60–90 दिन (MSME के लिये सरलीकृत प्रक्रिया में 30–35 दिन)।\n"
+                    f"**शुल्क**: IS मानक और उत्पाद श्रेणी के आधार पर भिन्न; [MANAK Online](https://www.manakonline.in) पर शुल्क तालिका देखें।\n"
+                    f"**स्रोत**: [BIS सेवा पोर्टल](https://www.services.bis.gov.in)"
+                )
+            else:
+                product_display = product_hint if product_hint else "product"
+                answer = (
+                    f"### BIS Certification Process for {product_display.title() if product_display else 'Your Product'}\n\n"
+                    f"**General Certification Process (Scheme I — ISI Mark):**\n\n"
+                    f"1. **Eligibility Check** — Verify that the product falls under a mandatory QCO / IS standard.\n"
+                    f"2. **Application** — Submit online application via [MANAK Online](https://www.manakonline.in) (Form V).\n"
+                    f"3. **Documents** — Submit factory registration, IS standard compliance certificate, quality control system documents, and test reports.\n"
+                    f"4. **Factory Inspection** — A BIS officer conducts an on-site inspection of the manufacturing unit and draws samples.\n"
+                    f"5. **Testing** — Samples are sent to a BIS-recognized laboratory for conformity testing.\n"
+                    f"6. **License Grant** — Upon satisfactory test report, the ISI Mark license is granted.\n\n"
+                    f"**Turnaround Time**: Typically 60–90 days (30–35 days for MSMEs under the Simplified Procedure).\n"
+                    f"**Fee**: Varies by IS standard and product category; check the [fee schedule on MANAK Online](https://www.manakonline.in).\n"
+                    f"**Source**: [BIS Services Portal](https://www.services.bis.gov.in)"
+                )
+            return {
+                "answer": answer,
+                "citations": [],
+                "source": "CERTIFICATION_PROCESS_TEMPLATE",
+                "verified": True,
+                "is_refusal": False
+            }
+
 
         # =====================================================================
         # 5. NO RELEVANT RESULTS (BELOW UNIFORM CONFIDENCE THRESHOLD)
