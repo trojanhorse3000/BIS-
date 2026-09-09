@@ -30,7 +30,8 @@ IN_SCOPE_KEYWORDS = [
 
 OUT_OF_SCOPE_TRIGGERS = [
     "recipe", "butter chicken", "cook", "bake", "ingredient", "dish",
-    "react", "component", "css", "html", "javascript", "tailwind", "programming", "python code for",
+    "fssai", "food safety", "pickles", "pickle", "food product", "food business",
+    "react", "component", "css", "html", "javascript", "tailwind", "programming", "python code for", "python script", "python code",
     "fda", "510(k)", "united states", "usa fda", "us fda", "ce mark", "osha",
     "bollywood", "actor", "actress", "movie", "film", "cinema", "award", "box office",
     "antibiotic", "sore throat", "symptoms", "prescription", "cure", "dosage", "diagnos"
@@ -48,10 +49,24 @@ def classify_intent(query: str, entities: Dict[str, Any]) -> Dict[str, Any]:
     is_explicit_refusal = any(trigger in q_lower for trigger in OUT_OF_SCOPE_TRIGGERS)
     has_in_scope = any(kw in q_lower for kw in IN_SCOPE_KEYWORDS) or bool(entities.get("is_numbers")) or bool(entities.get("huid_codes")) or bool(entities.get("search_keywords")) or bool(entities.get("product_terms"))
 
-    if is_explicit_refusal or (not has_in_scope and len(q_lower.split()) > 3):
+    if is_explicit_refusal:
         return {
             "intent": IntentType.OUT_OF_SCOPE,
-            "confidence": 0.98 if is_explicit_refusal else 0.85,
+            "confidence": 0.98,
+            "primary_target": None,
+            "reason": "Query falls outside the mandate of Bureau of Indian Standards (BIS)."
+        }
+    # Short queries without scope indicators go to GENERAL_KNOWLEDGE (not refused)
+    if not has_in_scope and len(q_lower.split()) <= 4:
+        return {
+            "intent": IntentType.GENERAL_KNOWLEDGE,
+            "confidence": 0.75,
+            "primary_target": None
+        }
+    if not has_in_scope:
+        return {
+            "intent": IntentType.OUT_OF_SCOPE,
+            "confidence": 0.85,
             "primary_target": None,
             "reason": "Query falls outside the mandate of Bureau of Indian Standards (BIS)."
         }
@@ -69,9 +84,9 @@ def classify_intent(query: str, entities: Dict[str, Any]) -> Dict[str, Any]:
         }
 
     # 3. HUID Verification & Hallmarking
-    if (entities.get("huid_codes") or "huid" in q_lower or 
-        ("hallmark" in q_lower and not is_nums) or 
-        "सोना" in query or "सोने" in query or "fineness" in q_lower or "karat" in q_lower):
+    if (entities.get("huid_codes") or "huid" in q_lower or
+        ("hallmark" in q_lower and not is_nums) or
+        "सोना" in query or "सोने" in query or "fineness" in q_lower or "karat" in q_lower or "purity" in q_lower):
         return {
             "intent": IntentType.HUID_VERIFICATION,
             "confidence": 0.95,
@@ -79,7 +94,7 @@ def classify_intent(query: str, entities: Dict[str, Any]) -> Dict[str, Any]:
         }
 
     # 4. Certification Schemes & Procedures (ISI Scheme I, CRS Scheme II, FMCS, CBTF, ECO Mark)
-    scheme_keywords = ["scheme", "crs", "fmcs", "cbtf", "eco mark", "apply for", "simplified procedure", "manak online", "प्रक्रिया", "प्रमाणन", "msme"]
+    scheme_keywords = ["scheme", "crs", "fmcs", "cbtf", "eco mark", "apply for", "simplified procedure", "manak online", "प्रक्रिया", "प्रमाणन", "msme", "certification process", "certification procedure", "procEDURE", "how to get", "how to obtain"]
     if any(sk in q_lower for sk in scheme_keywords):
         return {
             "intent": IntentType.CERTIFICATION_SCHEME,
@@ -87,7 +102,16 @@ def classify_intent(query: str, entities: Dict[str, Any]) -> Dict[str, Any]:
             "primary_target": None
         }
 
-    # 5. Crosswalk & Product Standards Lookup (e.g., "Cement BIS standards", "water bottles", "steel cylinder", "tyres QCO")
+    # 5. Penalty / legal / complaint about ISI mark → GENERAL_KNOWLEDGE (not CROSSWALK)
+    penalty_keywords = ["penalty", "fine", "punishment", "offence", "illegal", "fake", "complaint", "legal"]
+    if any(pk in q_lower for pk in penalty_keywords):
+        return {
+            "intent": IntentType.GENERAL_KNOWLEDGE,
+            "confidence": 0.85,
+            "primary_target": None
+        }
+
+    # 6. Crosswalk & Product Standards Lookup (e.g., "Cement BIS standards", "water bottles", "steel cylinder", "tyres QCO")
     crosswalk_triggers = ["qco", "mandatory", "compulsory", "crosswalk", "applies to", "which bis standard", "which standard", "isi mark compulsory", "लागू", "मानक", "order", "standard", "standards"]
     has_product = bool(entities.get("product_terms")) or bool(entities.get("search_keywords"))
     is_short_product_inquiry = has_product and (len(q_lower.split()) <= 4)
@@ -98,7 +122,7 @@ def classify_intent(query: str, entities: Dict[str, Any]) -> Dict[str, Any]:
             "primary_target": entities.get("hs_codes")[0] if entities.get("hs_codes") else (is_nums[0] if is_nums else (entities.get("product_terms")[0] if entities.get("product_terms") else None))
         }
 
-    # 6. General BIS Knowledge / RAG
+    # 7. General BIS Knowledge / RAG
     return {
         "intent": IntentType.GENERAL_KNOWLEDGE,
         "confidence": 0.75,
